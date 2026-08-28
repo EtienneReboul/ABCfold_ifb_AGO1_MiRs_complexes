@@ -1,5 +1,6 @@
 # ── Personal configuration (never commit) ────────────────────────────────────
 config.local.yaml
+HANDOFF.md
 
 # ── Pipeline runtime outputs ──────────────────────────────────────────────────
 data/fold_inputs/

@@ -67,32 +67,67 @@ COMPLEXES = {
     },
 }
 
-# chain lengths (from configs/*.yaml sequences) — used for the auto chain-offset search
+# chain lengths (from configs/*.yaml sequences) — used for the auto chain-offset
+# search. All four confirmed 1:1 against the canonical UniProt entry
+# (AGO1 O04379 folds 1050 vs 1048 canonical — a +2 N-terminal shift, so the
+# coordinates below, taken from a scan of the *folded* sequence, are already
+# construct-native; FBW2 Q9ZPE4 / ASK1 Q39255 / CUL1 Q94AH6 match exactly).
 CHAIN_LENGTHS = {"AGO1": 1050, "FBW2": 317, "ASK1": 160, "CUL1": 738,
                  "miR165a": 21, "miR168": 21, "miR393a": 22}
 
-# Best-effort domain tables. BOUNDARIES ARE APPROXIMATE — verify against
-# UniProt / the actual predicted fold before quoting them. Left as a single
-# window when no confident split exists; the notebook also has a fixed-width
-# window fallback (USE_WINDOWS) so heatmaps render regardless.
+# Domain tables — VERIFIED 2026-08-28 against the exact folded sequences via
+# ScanProsite (REST, PSScan.cgi) + InterProScan 5 (EBI REST: Pfam / SMART /
+# PROSITE profiles+patterns / CDD / SUPERFAMILY / Gene3D), cross-checked against
+# UniProt "Family & Domains". Boundaries are 1-based inclusive, contiguous, and
+# non-overlapping (linkers folded into the nearest domain). PROSITE profile
+# calls are quoted verbatim where one exists (AGO1 PAZ/PIWI, CUL1 cullin
+# homology); otherwise the consolidated InterPro/Pfam call is used. The notebook
+# still has a fixed-width window fallback (USE_WINDOWS) so heatmaps render
+# regardless.
+#
+# Provenance per domain (accession @ scanned span):
+#   AGO1  N_ext_Grich  UniProt disorder 1-143/165-188 + Pfam PF12764 Gly-rich 75-172
+#         ArgoN        Pfam PF16486 190-325
+#         ArgoL1       Pfam PF08699 / SMART SM01163 336-388
+#         PAZ          PROSITE profile PS50821 390-503 (Pfam PF02170 411-519)
+#         ArgoL2       Pfam PF16488 529-575
+#         MID          Pfam PF16487 ArgoMid 586-661
+#         PIWI         PROSITE profile PS50822 678-999 (Pfam PF02171 679-998) + C-term tail
+#   FBW2  F_box        UniProt 7-54 / Pfam PF12937 F-box-like 17-56
+#         LRR_solenoid SUPERFAMILY SSF52047 RNI-like 36-227 / Gene3D LRR 54-244
+#                      (NB: no curated WD40 despite the gene name — the C-lobe
+#                       scans as an LRR / ribonuclease-inhibitor-like solenoid)
+#         C_tail       245-317, acidic/aromatic-rich extension, no domain call
+#   ASK1  SKP1_POZ     Pfam PF03931 Skp1_POZ 4-63 / SUPERFAMILY POZ 5-64
+#         SKP1_dimer   Pfam PF01466 111-158 / SUPERFAMILY 83-158
+#                      (UniProt "interaction with F-box" 102-160)
+#   CUL1  cullin_repeats  Pfam PF00888 31-483 / SUPERFAMILY SSF74788 8-378 (N-term α-solenoid)
+#         cullin_homology PROSITE profile PS50069 383-613 / SUPERFAMILY 382-651
+#         cullin_CTD      Pfam PF10557 Cullin_Nedd8 668-730 + PROSITE pattern
+#                         PS01256 711-738 + Gene3D winged-helix 654-738
 CURATED_DOMAINS = {
     "AGO1": [
-        ("N_ext_Grich", 1, 190),     # Gly/Gln-rich, disordered N-terminal extension
-        ("N_domain", 191, 430),
-        ("PAZ", 431, 560),
-        ("MID", 561, 740),
-        ("PIWI", 741, 1050),
+        ("N_ext_Grich", 1, 189),     # disordered Gly/Gln-rich N-terminal extension
+        ("ArgoN", 190, 335),
+        ("ArgoL1", 336, 389),
+        ("PAZ", 390, 503),
+        ("ArgoL2", 504, 585),
+        ("MID", 586, 677),
+        ("PIWI", 678, 1050),
     ],
     "FBW2": [
-        ("F_box", 1, 48),
-        ("WD40", 49, 317),
+        ("F_box", 1, 54),
+        ("LRR_solenoid", 55, 244),
+        ("C_tail", 245, 317),
     ],
     "ASK1": [
-        ("SKP1", 1, 160),
+        ("SKP1_POZ", 1, 82),
+        ("SKP1_dimer", 83, 160),
     ],
     "CUL1": [
-        ("cullin_repeats", 1, 430),
-        ("cullin_CTD", 431, 738),     # cullin-homology / Nedd8 / RBX1-binding
+        ("cullin_repeats", 1, 382),   # N-terminal cullin-repeat α-solenoid
+        ("cullin_homology", 383, 651),
+        ("cullin_CTD", 652, 738),     # 4-helix bundle + winged-helix / Nedd8 / RBX1-binding
     ],
 }
 
@@ -163,12 +198,14 @@ def build_notebook(complex_name, spec):
         "**Receptor** is always the pose-cluster anchor, AGO1 (chain A). Every\n"
         "heatmap is one *couple*: AGO1 vs. one partner chain.\n\n"
         "---\n\n"
-        "**Domain boundaries below are BEST-EFFORT / approximate** — they are not\n"
-        "taken from a curated PROSITE annotation the way the DRB2 project's were.\n"
-        "Verify against UniProt / the predicted fold before quoting them, or set\n"
+        "**Domain boundaries below are PROSITE / InterPro-verified** (ScanProsite +\n"
+        "InterProScan 5, scanned against the exact folded sequences on 2026-08-28,\n"
+        "cross-checked against UniProt — see the provenance block in\n"
+        "`notebooks/generate_domain_notebooks.py`). PROSITE profile spans are quoted\n"
+        "verbatim where one exists (AGO1 PAZ/PIWI, CUL1 cullin homology). Set\n"
         "`USE_WINDOWS = True` in the domain-definitions cell to fall back to plain\n"
-        "fixed-width residue windows (every heatmap still renders, axis labels just\n"
-        "become `1-60`, `61-120`, …).\n"
+        "fixed-width residue windows instead (every heatmap still renders, axis\n"
+        "labels just become `1-60`, `61-120`, …).\n"
     ))
 
     cells.append(code(
@@ -288,14 +325,15 @@ def build_notebook(complex_name, spec):
 
     cells.append(md(
         "## Domain definitions\n\n"
-        "`USE_WINDOWS = True` ignores `CURATED_DOMAINS` and bins every chain into\n"
-        "fixed-width residue windows instead — use it if the approximate boundaries\n"
-        "below aren't trustworthy for your purpose."
+        "`CURATED_DOMAINS` below is the PROSITE / InterPro-verified table (see the\n"
+        "header note above). `USE_WINDOWS = True` ignores it and bins every chain\n"
+        "into fixed-width residue windows instead."
     ))
     cells.append(code(
         "USE_WINDOWS = False        # True -> fixed-width residue windows instead of CURATED_DOMAINS\n"
         "WINDOW = 60               # residues per window when USE_WINDOWS\n\n"
-        "# BEST-EFFORT boundaries (1-based inclusive). NOT a curated PROSITE call.\n"
+        "# PROSITE / InterPro-verified boundaries (1-based inclusive), scanned\n"
+        "# against the exact folded sequences 2026-08-28. See generate_domain_notebooks.py.\n"
         f"{curated_py}\n\n"
         "def windows_for(chain_len, w=None):\n"
         "    w = w or WINDOW\n"

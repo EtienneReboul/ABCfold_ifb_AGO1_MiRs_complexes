@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────
+# Complex spec — AGO1 x FBW2 x miR165a complex
+# Sequences copied verbatim from the sibling esther_project's AF3-webserver
+# job_request.json files (../../esther_project/data/AGO1_FBW2_miR165a/.../*_job_request.json).
+# AGO1 = ARGONAUTE 1 (Arabidopsis thaliana), FBW2 = F-box/WD40 protein FBW2.
+# ─────────────────────────────────────────────
+
+name: ago1_fbw2_mir165a
+
+sequences:
+  - type: protein
+    id: A
+    name: AGO1
+    sequence: "MVRKRRTDAPSEGGEGSGSREAGPVSGGGRGSQRGGFQQGGGQHQGGRGYTPQPQQGGRGGRGYGQPPQQQQQYGGPQEYQGRGRGGPPHQGGRGGYGGGRGGGPSSGPPQRQSVPELHQATSPTYQAVSSQPTLSEVSPTQVPEPTVLAQQFEQLSVEQGAPSQAIQPIPSSSKAFKFPMRPGKGQSGKRCIVKANHFFAELPDKDLHHYDVTITPEVTSRGVNRAVMKQLVDNYRDSHLGSRLPAYDGRKSLYTAGPLPFNSKEFRINLLDEEVGAGGQRREREFKVVIKLVARADLHHLGMFLEGKQSDAPQEALQVLDIVLRELPTSRIRYIPVGRSFYSPDIGKKQSLGDGLESWRGFYQSIRPTQMGLSLNIDMSSTAFIEANPVIQFVCDLLNRDISSRPLSDADRVKIKKALRGVKVEVTHRGNMRRKYRISGLTAVATRELTFPVDERNTQKSVVEYFHETYGFRIQHTQLPCLQVGNSNRPNYLPMEVCKIVEGQRYSKRLNERQITALLKVTCQRPIDREKDILQTVQLNDYAKDNYAQEFGIKISTSLASVEARILPPPWLKYHESGREGTCLPQVGQWNMMNKKMINGGTVNNWICINFSRQVQDNLARTFCQELAQMCYVSGMAFNPEPVLPPVSARPEQVEKVLKTRYHDATSKLSQGKEIDLLIVILPDNNGSLYGDLKRICETELGIVSQCCLTKHVFKMSKQYMANVALKINVKVGGRNTVLVDALSRRIPLVSDRPTIIFGADVTHPHPGEDSSPSIAAVVASQDWPEITKYAGLVCAQAHRQELIQDLFKEWKDPQKGVVTGGMIKELLIAFRRSTGHKPLRIIFYRDGVSEGQFYQVLLYELDAIRKACASLEAGYQPPVTFVVVQKRHHTRLFAQNHNDRHSVDRSGNILPGTVVDSKICHPTEFDFYLCSHAGIQGTSRPAHYHVLWDENNFTADGLQSLTNNLCYTYARCTRSVSIVPPAYYAHLAAFRARFYMEPETSDSGSMASGSMARGGGMAGRSTRGPNVNAAVRPLPALKENVKRVMFYC"
+  - type: protein
+    id: B
+    name: FBW2
+    sequence: "MEEDCEFRHWDELIPDALGLIFSHLPLQEVLTVVPRVCKAWNRAVTGPYCWQEIDIELWSNRFHQSDHLDRMLEMLIPRSAGSLRKLSVTGLRNDSIFSFIAQHAGSLKTLKVPRSGLTNSGVVNVAEKLSSLTFLDLSYCCKIGPEAIQAIGKHCKSLREFCRNMHPLDVASVVSHDDEAYAIANTMPKLKRLEIAYHRVSTEGVLKILSCCVFLEFLELRGCWDVQLDNKFFKEKFPDMKVLGPRVIGFYDMINDWEDCCSDYFSDGSDYLAWEFFEDGVMGEFYEDEFEHGWDDNFYAENAVLDMEPHIWPPSP"
+  - type: rna
+    id: C
+    name: miR165a
+    sequence: "UCGGACCAGGCUUCAUCCCCC"
+
+# Rigid structural anchor for pose clustering: AGO1 (the receptor).
+# RNA (chain C) is excluded from the pose-clustering feature vector — mixing
+# protein Ca and RNA P/C1' RMSD isn't meaningful; it still rides along in the
+# minimized / PLIP structures downstream.
+anchor_chain: A
+partner_chains: [B]        # FBW2 (RNA excluded — see above)
+
+# ── PLIP (Stage 3, postprocessing) — AGO1-anchored, receptor = AGO1 vs rest ──
+# Mirrors esther_project/configs/AGO1_FBW2_interactions.yaml's receptor=A view,
+# generalised to "receptor = anchor (AGO1) vs. ligand = every other chain".
+plip:
+  dnareceptor: true
+  fix_pdb: true
+  chains: "[['A'], ['B', 'C']]"
+  docker_memory: "8g"
+  docker_platform: "linux/amd64"
+
+# ── PLIP: miR-ligand pass (Stage 3f/g/h-alt) ─────────────────────────────────
+# Direct port of esther_project/configs/mir_ligands.yaml. The main plip: block
+# above folds the miR RNA into the receptor group alongside AGO1 (+ ASK1/CUL1),
+# so per-nucleotide miR contacts are invisible to it. This second pass omits
+# --chains entirely (PLIP segfaults if an RNA chain group is listed first) and
+# runs WITHOUT --dnareceptor, so every miR nucleotide is reported as its own
+# SMALLMOLECULE ligand and all positions surface; downstream analysis filters
+# to chain A (AGO1) as needed.
+plip_mir_ligands:
+  dnareceptor: false
+  fix_pdb: true          # ABCfold's RNA atom naming still needs canonicalising
+  chains: null            # omit --chains entirely
+  docker_memory: "8g"
+  docker_platform: "linux/amd64"

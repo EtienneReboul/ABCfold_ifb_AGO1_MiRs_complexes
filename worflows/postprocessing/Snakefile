@@ -1,0 +1,427 @@
+"""
+Snakefile_postprocess — Stage 3
+=================================
+Run locally, after rsync-ing back results/abcfold/<complex>/ from IFB.
+
+  3a. compress_abcfold_metadata — trim ABCfold's raw per-sample confidence
+      sprawl into model_metadata.parquet (scripts/compress_abcfold_metadata.py).
+      Best-effort local fallback: worflows/processing/submit_abcfold.sh
+      already runs this on the cluster after each complex finishes.
+  3b. pose_cluster              — AGO1-anchored rigid-core Kabsch +
+                                   hierarchical RMSD clustering, pooled
+                                   across all 6 backends x seeds
+                                   (scripts/pose_cluster_anchor.py)
+  3c. select_top_n_per_cluster  — top --top-n models per pose cluster by
+                                   ranking_score (scripts/select_top_n_per_cluster.py)
+  3d. minimize_cif               — ChimeraX energy minimisation
+  3e. fix_pdb                    — pdb4amber + PDBFixer (miR-containing
+                                    complexes only — per-complex configs/*.yaml
+                                    plip.fix_pdb toggle)
+  3f. run_plip                   — PLIP via Docker, receptor = anchor (AGO1)
+  3g. plip_to_csv / aggregate    — pliparser + merge per complex
+  3f/g/h-alt. plip_mir_ligands   — second PLIP pass, --chains omitted, no
+                                    --dnareceptor, so every miR nucleotide is
+                                    its own ligand (miR-containing complexes
+                                    only; port of esther_project/configs/mir_ligands.yaml)
+
+Usage:
+  snakemake -s worflows/postprocessing/Snakefile --cores 4 --use-conda
+"""
+
+import sys
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, "scripts")
+
+configfile: "config.yaml"
+
+if Path("config.local.yaml").exists():
+
+    configfile: "config.local.yaml"
+
+
+DIRS = config["dirs"]
+ABCFOLD_OUT_DIR = Path(DIRS["abcfold_out"])
+METADATA_DIR = Path(DIRS["metadata"])
+POSTPROC_DIR = Path(DIRS["postproc"])
+LOG_DIR = Path(DIRS["logs"])
+CLUSTER_CFG = config["cluster"]
+SELECTION_CFG = config["selection"]
+COMPLEXES = config["complexes"]
+CHIMERAX_BIN = config["chimerax_bin"]
+PLIP_IMAGE = config["plip_image"]
+
+
+def complex_plip_cfg(complex_name: str) -> dict:
+    return yaml.safe_load(Path(f"configs/{complex_name}.yaml").read_text())["plip"]
+
+
+def complex_plip_mir_ligands_cfg(complex_name: str) -> dict | None:
+    """None for complexes with no `plip_mir_ligands:` block (e.g. ago1_fbw2 and
+    ago1_fbw2_ask1_cul1, which have no miR) -- gates the miR-ligand PLIP pass
+    below to only the complex(es) that define it."""
+    cfg = yaml.safe_load(Path(f"configs/{complex_name}.yaml").read_text())
+    return cfg.get("plip_mir_ligands")
+
+
+MIR_LIGAND_COMPLEXES = [c for c in COMPLEXES if complex_plip_mir_ligands_cfg(c) is not None]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3a: compress ABCfold's raw confidence sprawl -> model_metadata.parquet
+# ─────────────────────────────────────────────────────────────────────────────
+
+rule compress_abcfold_metadata:
+    input:
+        done=str(ABCFOLD_OUT_DIR / "{complex}" / "prediction.done"),
+    output:
+        metadata=str(METADATA_DIR / "{complex}" / "model_metadata.parquet"),
+    log:
+        str(LOG_DIR / "compress_metadata" / "{complex}.log"),
+    conda:
+        "../../envs/metadata_compress.yaml"
+    shell:
+        """
+        python scripts/compress_abcfold_metadata.py \\
+        --protein {wildcards.complex} \\
+        --abcfold-output-root {ABCFOLD_OUT_DIR} \\
+        --out-root {METADATA_DIR} \\
+        --skip-merge \\
+        >{log} 2>&1
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3b: pose clustering (rigid anchor + hierarchical RMSD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+rule pose_cluster:
+    input:
+        metadata=str(METADATA_DIR / "{complex}" / "model_metadata.parquet"),
+        complex_config="configs/{complex}.yaml",
+    output:
+        csv=str(POSTPROC_DIR / "{complex}" / "pose_clusters.csv"),
+        rmsf_svg=str(POSTPROC_DIR / "{complex}" / "rmsf_profile.svg"),
+        pca_svg=str(POSTPROC_DIR / "{complex}" / "pose_clusters_pca.svg"),
+    log:
+        str(LOG_DIR / "pose_cluster" / "{complex}.log"),
+    conda:
+        "../../envs/postprocessing.yaml"
+    params:
+        n_iter=CLUSTER_CFG["n_iter"],
+        core_rmsf_target=CLUSTER_CFG["core_rmsf_target"],
+        min_core_frac=CLUSTER_CFG["min_core_frac"],
+        partner_rmsf_target=CLUSTER_CFG["partner_rmsf_target"],
+        partner_min_frac=CLUSTER_CFG["partner_min_frac"],
+        max_k=CLUSTER_CFG["max_k"],
+        out_dir=str(POSTPROC_DIR / "{complex}"),
+    shell:
+        """
+        python scripts/pose_cluster_anchor.py \\
+        --complex {wildcards.complex} \\
+        --complex-config {input.complex_config} \\
+        --abcfold-output-root {ABCFOLD_OUT_DIR} \\
+        --metadata-root {METADATA_DIR} \\
+        --out-root {params.out_dir} \\
+        --n-iter {params.n_iter} \\
+        --core-rmsf-target {params.core_rmsf_target} \\
+        --partner-rmsf-target {params.partner_rmsf_target} \\
+        --partner-min-frac {params.partner_min_frac} \\
+        --min-core-frac {params.min_core_frac} \\
+        --max-k {params.max_k} \\
+        >{log} 2>&1
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3c: top-N-per-cluster selection (checkpoint — discovers the set of
+# selected (cluster, fname) CIFs, unknown until this rule actually runs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+checkpoint select_top_n_per_cluster:
+    input:
+        pose_clusters=str(POSTPROC_DIR / "{complex}" / "pose_clusters.csv"),
+    output:
+        selected_dir=directory(str(POSTPROC_DIR / "{complex}" / "selected")),
+        csv=str(POSTPROC_DIR / "{complex}" / "selected_models.csv"),
+    log:
+        str(LOG_DIR / "select" / "{complex}.log"),
+    conda:
+        "../../envs/postprocessing.yaml"
+    params:
+        top_n=SELECTION_CFG["top_n"],
+        rank_by=SELECTION_CFG["rank_by"],
+        out_dir=str(POSTPROC_DIR / "{complex}"),
+    shell:
+        """
+        python scripts/select_top_n_per_cluster.py \\
+        --pose-clusters {input.pose_clusters} \\
+        --abcfold-output-root {ABCFOLD_OUT_DIR} \\
+        --out-root {params.out_dir} \\
+        --top-n {params.top_n} \\
+        --rank-by {params.rank_by} \\
+        >{log} 2>&1
+        """
+
+
+def selected_targets(wildcards):
+    """Every (cluster, fname) pair select_top_n_per_cluster staged for this
+    complex."""
+    co = checkpoints.select_top_n_per_cluster.get(complex=wildcards.complex).output.selected_dir
+    wc = glob_wildcards(str(Path(co) / "cluster_{cluster}" / "{fname}.cif"))
+    return wc.cluster, wc.fname
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3d: minimise with ChimeraX
+# ─────────────────────────────────────────────────────────────────────────────
+
+rule minimize_cif:
+    input:
+        cif=str(POSTPROC_DIR / "{complex}" / "selected" / "cluster_{cluster}" / "{fname}.cif"),
+    output:
+        pdb=str(POSTPROC_DIR / "{complex}" / "minimized" / "{cluster}" / "{fname}" / "{fname}.pdb"),
+    params:
+        outdir=str(POSTPROC_DIR / "{complex}" / "minimized" / "{cluster}" / "{fname}"),
+        chimerax=CHIMERAX_BIN,
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_minimize.log"),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        {params.chimerax} --nogui --script "scripts/minimize_cif.py {input.cif} {output.pdb}" \
+        > {log} 2>&1
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3e: fix_pdb — canonicalise RNA/DNA + fill missing heavy atoms
+# ─────────────────────────────────────────────────────────────────────────────
+# Always defined; whether any given complex needs it is decided by
+# plip_input_pdb() / plip_mir_ligands_input_pdb() below (per-complex
+# configs/<complex>.yaml plip.fix_pdb). Snakemake only builds a _fixed.pdb when
+# something downstream asks for one, so ago1_fbw2 / ago1_fbw2_ask1_cul1
+# (fix_pdb: false, no RNA) never trigger this rule.
+
+rule fix_pdb:
+    input:
+        pdb=str(POSTPROC_DIR / "{complex}" / "minimized" / "{cluster}" / "{fname}" / "{fname}.pdb"),
+    output:
+        fixed=str(POSTPROC_DIR / "{complex}" / "minimized" / "{cluster}" / "{fname}" / "{fname}_fixed.pdb"),
+    params:
+        amber=str(POSTPROC_DIR / "{complex}" / "minimized" / "{cluster}" / "{fname}" / "{fname}_amber.pdb"),
+    conda:
+        "../../envs/fix_pdb.yaml"
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_fix_pdb.log"),
+    shell:
+        """
+        set -euo pipefail
+        pdb4amber -i {input.pdb} -o {params.amber} --nohyd >> {log} 2>&1
+        python scripts/fix_pdb.py --input {params.amber} --output {output.fixed} >> {log} 2>&1
+        """
+
+
+def plip_input_pdb(wildcards):
+    cfg = complex_plip_cfg(wildcards.complex)
+    base = str(POSTPROC_DIR / wildcards.complex / "minimized" / wildcards.cluster / wildcards.fname / wildcards.fname)
+    return f"{base}_fixed.pdb" if cfg["fix_pdb"] else f"{base}.pdb"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3f: PLIP via Docker — receptor = anchor (AGO1) vs. ligand = the rest
+# ─────────────────────────────────────────────────────────────────────────────
+
+rule run_plip:
+    input:
+        pdb=plip_input_pdb,
+    output:
+        report=str(POSTPROC_DIR / "{complex}" / "plip" / "{cluster}" / "{fname}" / "{fname}_report" / "{fname}_report.txt"),
+    params:
+        image=PLIP_IMAGE,
+        docker_memory=lambda wc: complex_plip_cfg(wc.complex)["docker_memory"],
+        docker_platform_flag=lambda wc: (
+            f"--platform {complex_plip_cfg(wc.complex)['docker_platform']}"
+            if complex_plip_cfg(wc.complex).get("docker_platform") else ""
+        ),
+        dnareceptor_flag=lambda wc: "--dnareceptor" if complex_plip_cfg(wc.complex)["dnareceptor"] else "",
+        chains_flag=lambda wc: f'--chains "{complex_plip_cfg(wc.complex)["chains"]}"',
+        outdir=str(POSTPROC_DIR / "{complex}" / "plip" / "{cluster}" / "{fname}" / "{fname}_report"),
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_plip.log"),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        docker run --rm --memory={params.docker_memory} \
+            {params.docker_platform_flag} \
+            -v $(pwd):/work \
+            -w /work \
+            {params.image} \
+            -f {input.pdb} \
+            -t \
+            {params.dnareceptor_flag} {params.chains_flag} \
+            -o {params.outdir} \
+        > {log} 2>&1
+        # PLIP names its report after the *input* PDB's basename, not after
+        # {wildcards.fname} -- when fix_pdb is on (miR-containing complexes),
+        # the input is "{wildcards.fname}_fixed.pdb", so PLIP writes
+        # "{wildcards.fname}_fixed_report.txt". Normalize to the declared name
+        # (no-op when they already match).
+        actual="{params.outdir}/$(basename {input.pdb} .pdb)_report.txt"
+        if [ "$actual" != "{output.report}" ]; then
+            mv "$actual" "{output.report}"
+        fi
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3g: convert PLIP report -> CSV with pliparser
+# ─────────────────────────────────────────────────────────────────────────────
+
+rule plip_to_csv:
+    input:
+        report=str(POSTPROC_DIR / "{complex}" / "plip" / "{cluster}" / "{fname}" / "{fname}_report" / "{fname}_report.txt"),
+    output:
+        summary=str(POSTPROC_DIR / "{complex}" / "plip" / "{cluster}" / "{fname}" / "{fname}_report" / "csv" / "summary.csv"),
+    params:
+        outdir=str(POSTPROC_DIR / "{complex}" / "plip" / "{cluster}" / "{fname}" / "{fname}_report" / "csv"),
+    conda:
+        "../../envs/pliparser.yaml"
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_pliparser.log"),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        pliparser plip2csv --input {input.report} --output {params.outdir}/ > {log} 2>&1
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3h: aggregate all selected models' summary.csv per complex
+# ─────────────────────────────────────────────────────────────────────────────
+
+def summaries_for_complex(wildcards):
+    clusters, fnames = selected_targets(wildcards)
+    return [
+        str(POSTPROC_DIR / wildcards.complex / "plip" / c / f / f"{f}_report" / "csv" / "summary.csv")
+        for c, f in zip(clusters, fnames)
+    ]
+
+
+rule aggregate:
+    input:
+        csvs=summaries_for_complex,
+    output:
+        str(POSTPROC_DIR / "{complex}" / "all_selected_summary.csv"),
+    conda:
+        "../../envs/aggregate.yaml"
+    log:
+        str(LOG_DIR / "{complex}" / "aggregate.log"),
+    shell:
+        """
+        python scripts/aggregate_summaries.py --output {output} {input.csvs} > {log} 2>&1
+        """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3f/g/h-alt: miR-ligand PLIP pass -- separate from the main plip: block
+# above, only for complexes with a `plip_mir_ligands:` config (see
+# configs/ago1_fbw2_mir168.yaml). Reuses the same {fname}_fixed.pdb rule
+# fix_pdb already builds -- no duplicate minimize/fix_pdb work.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plip_mir_ligands_input_pdb(wildcards):
+    cfg = complex_plip_mir_ligands_cfg(wildcards.complex)
+    base = str(POSTPROC_DIR / wildcards.complex / "minimized" / wildcards.cluster / wildcards.fname / wildcards.fname)
+    return f"{base}_fixed.pdb" if cfg["fix_pdb"] else f"{base}.pdb"
+
+
+rule run_plip_mir_ligands:
+    input:
+        pdb=plip_mir_ligands_input_pdb,
+    output:
+        report=str(POSTPROC_DIR / "{complex}" / "plip_mir_ligands" / "{cluster}" / "{fname}" / "{fname}_report" / "{fname}_report.txt"),
+    params:
+        image=PLIP_IMAGE,
+        docker_memory=lambda wc: complex_plip_mir_ligands_cfg(wc.complex)["docker_memory"],
+        docker_platform_flag=lambda wc: (
+            f"--platform {complex_plip_mir_ligands_cfg(wc.complex)['docker_platform']}"
+            if complex_plip_mir_ligands_cfg(wc.complex).get("docker_platform") else ""
+        ),
+        dnareceptor_flag=lambda wc: "--dnareceptor" if complex_plip_mir_ligands_cfg(wc.complex)["dnareceptor"] else "",
+        chains_flag=lambda wc: (
+            f'--chains "{complex_plip_mir_ligands_cfg(wc.complex)["chains"]}"'
+            if complex_plip_mir_ligands_cfg(wc.complex).get("chains") else ""
+        ),
+        outdir=str(POSTPROC_DIR / "{complex}" / "plip_mir_ligands" / "{cluster}" / "{fname}" / "{fname}_report"),
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_plip_mir_ligands.log"),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        docker run --rm --memory={params.docker_memory} \
+            {params.docker_platform_flag} \
+            -v $(pwd):/work \
+            -w /work \
+            {params.image} \
+            -f {input.pdb} \
+            -t \
+            {params.dnareceptor_flag} {params.chains_flag} \
+            -o {params.outdir} \
+        > {log} 2>&1
+        # same PLIP report-basename quirk as run_plip -- see its comment.
+        actual="{params.outdir}/$(basename {input.pdb} .pdb)_report.txt"
+        if [ "$actual" != "{output.report}" ]; then
+            mv "$actual" "{output.report}"
+        fi
+        """
+
+
+rule plip_to_csv_mir_ligands:
+    input:
+        report=str(POSTPROC_DIR / "{complex}" / "plip_mir_ligands" / "{cluster}" / "{fname}" / "{fname}_report" / "{fname}_report.txt"),
+    output:
+        summary=str(POSTPROC_DIR / "{complex}" / "plip_mir_ligands" / "{cluster}" / "{fname}" / "{fname}_report" / "csv" / "summary.csv"),
+    params:
+        outdir=str(POSTPROC_DIR / "{complex}" / "plip_mir_ligands" / "{cluster}" / "{fname}" / "{fname}_report" / "csv"),
+    conda:
+        "../../envs/pliparser.yaml"
+    log:
+        str(LOG_DIR / "{complex}" / "{cluster}" / "{fname}_pliparser_mir_ligands.log"),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        pliparser plip2csv --input {input.report} --output {params.outdir}/ > {log} 2>&1
+        """
+
+
+def summaries_for_complex_mir_ligands(wildcards):
+    clusters, fnames = selected_targets(wildcards)
+    return [
+        str(POSTPROC_DIR / wildcards.complex / "plip_mir_ligands" / c / f / f"{f}_report" / "csv" / "summary.csv")
+        for c, f in zip(clusters, fnames)
+    ]
+
+
+rule aggregate_mir_ligands:
+    input:
+        csvs=summaries_for_complex_mir_ligands,
+    output:
+        str(POSTPROC_DIR / "{complex}" / "all_selected_summary_mir_ligands.csv"),
+    conda:
+        "../../envs/aggregate.yaml"
+    log:
+        str(LOG_DIR / "{complex}" / "aggregate_mir_ligands.log"),
+    shell:
+        """
+        python scripts/aggregate_summaries.py --output {output} {input.csvs} > {log} 2>&1
+        """
+
+
+rule all:
+    default_target: True
+    input:
+        expand(str(POSTPROC_DIR / "{complex}" / "all_selected_summary.csv"), complex=COMPLEXES),
+        expand(str(POSTPROC_DIR / "{complex}" / "all_selected_summary_mir_ligands.csv"), complex=MIR_LIGAND_COMPLEXES),

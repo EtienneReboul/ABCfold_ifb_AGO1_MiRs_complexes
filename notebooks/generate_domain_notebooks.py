@@ -24,6 +24,87 @@ _SIBLING_POSE = pathlib.Path(
 )
 SRC_POSE = _SIBLING_POSE if _SIBLING_POSE.exists() else None
 
+
+def _customize_pose_clustering(nb, complexes):
+    """Post-process the DRB2-derived pose_clustering.ipynb:
+      1. axis titles carry PCA explained variance (from
+         results/<complex>/pose_clusters_pca_variance.json);
+      2. one standalone example section per complex (the DRB2 source ships a
+         single hard-coded complex).
+    Assumes the DRB2 layout: cell 0 intro md, cell 1 helpers code, cell 2
+    "## Load data" md, then a load cell + "## Examples" md + plot cells."""
+    import secrets
+
+    def _c(kind, text):
+        base = {"cell_type": kind, "id": secrets.token_hex(4), "metadata": {},
+                "source": text.splitlines(keepends=True)}
+        if kind == "code":
+            base.update(execution_count=None, outputs=[])
+        return base
+
+    OLD_LAYOUT = (
+        '    fig.update_layout(\n'
+        '        title=title, xaxis_title="PC1", yaxis_title="PC2",\n'
+        '        template="plotly_white", height=620, width=820,\n'
+        '        legend=dict(font=dict(size=9)),\n'
+        '    )')
+    NEW_LAYOUT = (
+        '    var_path = (RESULTS_ROOT / complex_name / "pose_clusters_pca_variance.json") if complex_name else None\n'
+        '    pca_var = json.loads(var_path.read_text()) if var_path and var_path.exists() else {}\n'
+        '    x_title = (f"PC1 ({pca_var[\'pc1_explained_variance\']:.1%} explained variance)"\n'
+        '               if pca_var else "PC1")\n'
+        '    y_title = (f"PC2 ({pca_var[\'pc2_explained_variance\']:.1%} explained variance)"\n'
+        '               if pca_var else "PC2")\n'
+        '\n'
+        '    fig.update_layout(\n'
+        '        title=title, xaxis_title=x_title, yaxis_title=y_title,\n'
+        '        template="plotly_white", height=620, width=820,\n'
+        '        legend=dict(font=dict(size=9)),\n'
+        '    )')
+    patched = 0
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        src = "".join(cell["source"])
+        if OLD_LAYOUT in src:
+            cell["source"] = src.replace(OLD_LAYOUT, NEW_LAYOUT).splitlines(keepends=True)
+            patched += 1
+    if patched != 1:
+        raise SystemExit(f"pose_clustering axis-variance patch: expected 1 site, hit {patched} "
+                         "(DRB2 source layout changed -- update _customize_pose_clustering)")
+
+    cells = nb["cells"][:2]
+    cells.append(_c("markdown", "## Load data\n"))
+    cells.append(_c("code",
+        "COMPLEXES = [\n" + "".join(f'    "{c}",\n' for c in complexes) + "]\n"
+        "\n"
+        "# results/<complex>/pose_clusters.csv exists for all complexes regardless of\n"
+        "# postprocessing progress (compress -> pose_cluster -> select runs early).\n"
+        "# load_pose_clusters prints an n-models + PC1/PC2 explained-variance line each.\n"
+        "dfs = {name: load_pose_clusters(name) for name in COMPLEXES}\n"))
+    cells.append(_c("markdown",
+        "## Examples\n\n"
+        "One `plot_pca` call per cell: each opens its own figure, so you can\n"
+        "zoom/pan/hover one plot without a later cell's output replacing it. Every\n"
+        "section is standalone -- it rebinds its own `df_<complex>` from `dfs`.\n"))
+    for c in complexes:
+        cells.append(_c("markdown", f"### `{c}`\n"))
+        cells.append(_c("code", f'df_{c} = dfs["{c}"]\ndf_{c}.head()\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}")  # pipeline\'s own hierarchical-RMSD clusters\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}", color_by="backend", cluster_method=None)  # coloured by backend\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}", cluster_method="gmm", n_components="auto")  # GMM auto (BIC-knee)\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}", cluster_method="gmm", n_components=4)  # GMM manual k -- adjust per complex\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}", cluster_method="hdbscan", n_components="auto")  # HDBSCAN auto (Optuna/DBCV)\n'))
+        cells.append(_c("code",
+            f'plot_pca(df_{c}, complex_name="{c}", models={{**{{b: True for b in df_{c}["backend"].unique()}}, "alphafold3": False}})  # ablation: AF3 excluded\n'))
+    nb["cells"] = cells
+    return nb
+
 # ── per-complex parameters ───────────────────────────────────────────────────
 # chain letter -> (display name, kind)   kind in {"protein", "rna"}
 COMPLEXES = {
@@ -506,7 +587,7 @@ def build_notebook(complex_name, spec):
         "            x_labels, y_labels, rate = mats[g]\n"
         "            r, cc = i // ncols + 1, i % ncols + 1\n"
         "            fig.add_trace(go.Heatmap(z=rate.values, x=x_labels, y=y_labels, colorscale=\"YlOrRd\",\n"
-        "                zmin=0, zmax=zmax, showscale=(g == present[-1]),\n"
+        "                zmin=0, zmax=float(zmax), showscale=bool(g == present[-1]),\n"
         "                text=[[f\"{v:.2f}\" if v > 0 else \"\" for v in row] for row in rate.values],\n"
         "                texttemplate=\"%{text}\", textfont=dict(size=7),\n"
         "                hovertemplate=f\"{tag} {g}<br>%{{y}} / %{{x}}<br>%{{z:.3f}}/model<extra></extra>\"),\n"
@@ -679,5 +760,6 @@ else:
     rep = rep.replace(
         "../../NPF-ab-initio-modelling/ABCfold_NPF_pipeline",
         "../../drb2_modelling/ABCfold_ifb_drbs_dcl4_ds_rna_complexes (sibling)")
-    (NB_DIR / "pose_clustering.ipynb").write_text(rep)
-    print("wrote", NB_DIR / "pose_clustering.ipynb")
+    pose_nb = _customize_pose_clustering(json.loads(rep), list(COMPLEXES))
+    (NB_DIR / "pose_clustering.ipynb").write_text(json.dumps(pose_nb, indent=1) + "\n")
+    print("wrote", NB_DIR / "pose_clustering.ipynb", f"({len(pose_nb['cells'])} cells, {len(COMPLEXES)} complexes)")

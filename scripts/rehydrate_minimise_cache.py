@@ -58,10 +58,18 @@ from pathlib import Path
 SNAPSHOT = ".rehydrate_snapshot.tsv"
 
 # per-model cached artefacts:  <tree>/<cluster>/<fname>/<rel formatted with {f}=fname>
+# each entry is (rel-path template, dependency layer). The layer sets the
+# relinked file's mtime = now + layer*LAYER_GAP so Snakemake's `--rerun-triggers
+# mtime` sees the full chain as current: cif < minimized.pdb < _fixed.pdb <
+# plip report.txt < plip summary.csv (and likewise for plip_mir_ligands). Using
+# a plain enumerate() index here is the classic bug — plip/report.txt then lands
+# at the same mtime as minimized/pdb and *older* than _fixed.pdb, so PLIP re-runs
+# for every carried-forward model.
+LAYER_GAP = 4  # seconds between dependency layers (> fs mtime granularity)
 ARTEFACTS = {
-    "minimized":        ["{f}.pdb", "{f}_fixed.pdb"],
-    "plip":             ["{f}_report/{f}_report.txt", "{f}_report/csv/summary.csv"],
-    "plip_mir_ligands": ["{f}_report/{f}_report.txt", "{f}_report/csv/summary.csv"],
+    "minimized":        [("{f}.pdb", 0), ("{f}_fixed.pdb", 1)],
+    "plip":             [("{f}_report/{f}_report.txt", 2), ("{f}_report/csv/summary.csv", 3)],
+    "plip_mir_ligands": [("{f}_report/{f}_report.txt", 2), ("{f}_report/csv/summary.csv", 3)],
 }
 
 
@@ -138,7 +146,7 @@ def do_apply(complex_dir: Path, dry: bool) -> dict[str, int]:
             new_dir = complex_dir / tree / new_cl / new_fn
             if not old_dir.is_dir():
                 continue
-            for i, rel in enumerate(rels):
+            for rel, layer in rels:
                 s = old_dir / rel.format(f=old_fn)
                 if not s.is_file():
                     continue
@@ -147,7 +155,8 @@ def do_apply(complex_dir: Path, dry: bool) -> dict[str, int]:
                     n_files += 1
                     moved = True
                     if not dry:
-                        os.utime(d, (now + i, now + i))
+                        t = now + layer * LAYER_GAP
+                        os.utime(d, (t, t))
         if moved:
             n_relinked += 1
         else:

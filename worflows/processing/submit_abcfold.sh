@@ -469,6 +469,13 @@ module load singularity   # ABCfold shells out to \`singularity exec\` directly 
 module load "cuda-toolkit/\$CUDA_MODULE_VERSION"   # Protenix needs CUDA_HOME to build its CUDA extensions
 export CUDA_HOME="\$CUDA_HOME_PATH"
 
+# Boltz-2 peaks at ~96% of the H200's 143 GB for the ~1367-1389-res complexes;
+# the default caching allocator then OOMs on fragmentation partway through a
+# seed. expandable_segments removes that fragmentation and drops the peak to
+# ~135 GB with ~9 GB headroom — the difference between "0 CIFs" and a clean run
+# (verified 2026-09-08). Harmless to the other backends.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 echo "[\$(date)] Array task \$TASK_ID — batch size $BATCH_SIZE"
 echo "  Manifest: \$MANIFEST"
 echo "  abcfold: \$ABCFOLD_BIN"

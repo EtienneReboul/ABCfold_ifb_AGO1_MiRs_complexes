@@ -60,21 +60,28 @@ mmseqs2:
 # check per-backend CIF counts after the run, don't trust the SLURM COMPLETED
 # state alone. The 4 AGO1/FBW2(+miR) complexes are ~1367–1389 residues and
 # should clear every remaining backend's limit. (Boltz is disabled — see below.)
-# Boltz (-b) is DISABLED (2026-09-08). It produced zero structures on every
-# complex in two full runs, and failed on the *smallest* one (ago1_fbw2,
-# 1367 res) too, so this is not a complex-size limit. On a verified-idle
-# H200 (143 GB) Boltz-2 2.2.1 dies at the first inference batch in ~2 s with
-# a CUDA "out of memory" RuntimeError: with cuEquivariance kernels it peaks
-# at 137 GB and logs "Non-SM100f kernel" (the kernels target Blackwell / SM100
-# and degrade badly on the H200 / SM90); with --no_kernels it peaks at only
-# 64 GB yet still errors instantly. Deleting and letting `abcfold --prime`
-# rebuild the abcfold-boltz-py311 micromamba env from scratch deterministically
-# reinstalls `cuda-toolkit 13` + a full CUDA-13 nvidia-* wheel stack that
-# conflicts with torch's CUDA-12.6 stack — a broken dependency chain in the
-# current boltz / cuequivariance-ops-torch-cu12 / boltzina PyPI releases.
-# Re-enabling Boltz needs that whole CUDA dependency tree pinned and the
-# cuEquivariance-on-Hopper issue resolved upstream — out of scope here.
-# The 5 remaining backends are a solid ensemble.
+# Boltz (-b) is DISABLED (2026-09-08). Zero structures on every complex in
+# two full runs; fails on the *smallest* one (ago1_fbw2, 1367 res) too, so
+# it is NOT a size limit. Root cause (found by testing a clean env on both
+# an idle L40S 46 GB and an idle H200 143 GB):
+#
+#   `abcfold`'s ensure_boltz_env now resolves the backend env to torch 2.7.0,
+#   which boltz 2.2.1 + cuequivariance-ops-torch-cu12 0.11 do NOT support:
+#     - kernel path: cuequivariance_ops_torch fails to import —
+#       `ImportError: cannot import name 'is_fx_symbolic_tracing' from
+#        torch.fx._symbolic_trace` (removed in torch 2.7) -> Triton kernels dead
+#     - --no_kernels (native) path: throws at the first prediction batch (~6 s),
+#       another torch-2.7 API break, which Boltz's broad `except RuntimeError
+#       … "out of memory"` mislabels as OOM. Peak VRAM was only 64–96 GB of
+#       143 GB free, so it is not really running out of memory.
+#   Also: `abcfold --prime` deterministically drags `cuda-toolkit 13` + a
+#   CUDA-13 nvidia-* wheel stack in over torch's CUDA-12.6 stack.
+#
+# This matches the NPF project's experience that Boltz *did* work on an L40S
+# before — that was an older env with a torch < 2.7. Re-enabling needs the
+# boltz env pinned to a torch/triton/cuequivariance combo boltz 2.2.1
+# actually supports, AND abcfold's ensure_boltz_env stopped from re-upgrading
+# it. Out of scope. The 5 remaining backends are a solid ensemble.
 abcfold:
   models:
     alphafold3: true          # -a

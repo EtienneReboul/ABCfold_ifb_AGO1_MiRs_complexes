@@ -109,7 +109,12 @@ AF3_SIF_PATH=""                                   # leave empty to auto-discover
                                                    # set explicitly (or config.yaml's abcfold.af3_sif_path) to override
 CUDA_MODULE_VERSION="12.9.1"                      # IFB cuda-toolkit module — Protenix needs CUDA_HOME set to
                                                    # build its CUDA extensions; see discover_cuda_home below
-MODELS="abcopr"                                   # -a -b -c -o -p -r letters to run together
+# Boltz (-b) dropped 2026-09-08: 0 structures on every complex incl. the
+# smallest; on an idle H200 it OOMs at the first batch in ~2 s (cuEquivariance
+# kernels target Blackwell/SM100, degrade on Hopper/SM90), and a clean
+# `abcfold --prime` env rebuild deterministically reinstalls a conflicting
+# CUDA-13 toolkit over torch's CUDA-12.6 stack. See config.yaml's abcfold: block.
+MODELS="acopr"                                    # -a -c -o -p -r letters to run together (Boltz -b disabled)
 
 NUMBER_OF_MODELS=5        # abcfold --number_of_models (config.yaml abcfold.number_of_models)
 NUM_RECYCLES=10            # abcfold --num_recycles     (config.yaml abcfold.num_recycles)

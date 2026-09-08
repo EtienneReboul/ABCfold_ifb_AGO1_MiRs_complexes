@@ -55,15 +55,30 @@ mmseqs2:
 # one `abcfold` invocation per complex.
 #
 # NOTE (carried over from the DRB2 pipeline's experience): the two ASK1/CUL1
-# complexes are ~2265–2286 residues. At that size Chai-1 (hard 2048-token cap),
-# Protenix (hard 2560-token cap) and Boltz (OOM even on an H200) may all fail
-# while `abcfold` still exits 0 — check per-backend CIF counts after the run,
-# don't trust the SLURM COMPLETED state alone. The 4 AGO1/FBW2(+miR) complexes
-# are ~1367–1389 residues and should clear every backend's limit.
+# complexes are ~2265–2286 residues. At that size Chai-1 (hard 2048-token cap)
+# and Protenix (hard 2560-token cap) may fail while `abcfold` still exits 0 —
+# check per-backend CIF counts after the run, don't trust the SLURM COMPLETED
+# state alone. The 4 AGO1/FBW2(+miR) complexes are ~1367–1389 residues and
+# should clear every remaining backend's limit. (Boltz is disabled — see below.)
+# Boltz (-b) is DISABLED (2026-09-08). It produced zero structures on every
+# complex in two full runs, and failed on the *smallest* one (ago1_fbw2,
+# 1367 res) too, so this is not a complex-size limit. On a verified-idle
+# H200 (143 GB) Boltz-2 2.2.1 dies at the first inference batch in ~2 s with
+# a CUDA "out of memory" RuntimeError: with cuEquivariance kernels it peaks
+# at 137 GB and logs "Non-SM100f kernel" (the kernels target Blackwell / SM100
+# and degrade badly on the H200 / SM90); with --no_kernels it peaks at only
+# 64 GB yet still errors instantly. Deleting and letting `abcfold --prime`
+# rebuild the abcfold-boltz-py311 micromamba env from scratch deterministically
+# reinstalls `cuda-toolkit 13` + a full CUDA-13 nvidia-* wheel stack that
+# conflicts with torch's CUDA-12.6 stack — a broken dependency chain in the
+# current boltz / cuequivariance-ops-torch-cu12 / boltzina PyPI releases.
+# Re-enabling Boltz needs that whole CUDA dependency tree pinned and the
+# cuEquivariance-on-Hopper issue resolved upstream — out of scope here.
+# The 5 remaining backends are a solid ensemble.
 abcfold:
   models:
     alphafold3: true          # -a
-    boltz: true                # -b
+    boltz: false               # -b  — DISABLED, see comment above
     chai1: true                 # -c
     openfold3: true             # -o
     protenix: true               # -p

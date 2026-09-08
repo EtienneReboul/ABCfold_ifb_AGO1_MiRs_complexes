@@ -109,13 +109,13 @@ AF3_SIF_PATH=""                                   # leave empty to auto-discover
                                                    # set explicitly (or config.yaml's abcfold.af3_sif_path) to override
 CUDA_MODULE_VERSION="12.9.1"                      # IFB cuda-toolkit module — Protenix needs CUDA_HOME set to
                                                    # build its CUDA extensions; see discover_cuda_home below
-# Boltz (-b) dropped 2026-09-08: 0 structures on every complex incl. the
-# smallest. Root cause = boltz 2.2.1 + cuequivariance-ops-torch 0.11 are
-# incompatible with torch 2.7.0 (which abcfold's env-build now resolves to):
-# the Triton kernels fail to import and the native --no_kernels path throws
-# at the first batch, mislabelled as OOM (peak VRAM 64-96 GB of 143 free).
-# See config.yaml's abcfold: block for the full write-up.
-MODELS="acopr"                                    # -a -c -o -p -r letters to run together (Boltz -b disabled)
+# Boltz (-b): broken then FIXED 2026-09-08 — abcfold installed
+# cuequivariance-ops-torch-cu12 0.11 (needs torch>=2.11) into a torch-2.7 env;
+# pinned it to 0.10.0 and patched check_install.py to keep it <0.11. Verified
+# working on the H200 for the 4 small complexes (peak ~135-139 GB / 143 GB).
+# The 2 ASK1/CUL1 complexes (~2265 res) still OOM Boltz — genuine size limit.
+# See config.yaml's abcfold: block.
+MODELS="abcopr"                                   # -a -b -c -o -p -r letters to run together
 
 NUMBER_OF_MODELS=5        # abcfold --number_of_models (config.yaml abcfold.number_of_models)
 NUM_RECYCLES=10            # abcfold --num_recycles     (config.yaml abcfold.num_recycles)

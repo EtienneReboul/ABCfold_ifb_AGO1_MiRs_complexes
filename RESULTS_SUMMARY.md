@@ -60,20 +60,28 @@ notebooks and `results/<complex>/figures/domain_analysis/**` for the full plots.
 
 ## 2. Pipeline status & caveats
 
+*Updated 2026-09-09: Boltz was recovered and folded into the four small
+complexes — they are now 6-backend / 600-model ensembles. The two ASK1/CUL1
+complexes stay 4-backend (Boltz OOMs at ~2265 res). Original 5-backend numbers
+in parentheses where they differ.*
+
 | complex | selected | usable after energy filter | backends present | pose clusters | deliverables |
 |---|---|---|---|---|---|
-| ago1_fbw2 | 500 | 469 | AF3, Chai-1, OpenFold3, Protenix, RF3 | 3 | ✅ summary |
-| ago1_fbw2_mir165a | 500 | 475 | 5 | 6 | ✅ summary + mir_ligands |
-| ago1_fbw2_mir168 | 500 | 478 | 5 | 3 | ✅ summary + mir_ligands |
-| ago1_fbw2_mir393a | 500 | 465 | 5 | 2 | ✅ summary + mir_ligands |
+| ago1_fbw2 | 600 (500) | 570 (469) | AF3, **Boltz**, Chai-1, OpenFold3, Protenix, RF3 | 4 (3) | ✅ summary |
+| ago1_fbw2_mir165a | 600 | 575 | 6 | 4 (6) | ✅ summary + mir_ligands |
+| ago1_fbw2_mir168 | 600 | 577 | 6 | 3 | ✅ summary + mir_ligands |
+| ago1_fbw2_mir393a | 600 | 565 | 6 | 3 (2) | ✅ summary + mir_ligands |
 | ago1_fbw2_ask1_cul1 | 400 (399) | 367 | AF3, OpenFold3, Protenix, RF3 | 7 | ✅ summary (399/400) |
 | ago1_fbw2_ask1_cul1_mir168 | 400 | 371 | 4 | 8 | ✅ summary + mir_ligands (399/400) |
 
 **Caveats to keep in mind when reading the numbers:**
 
-- **Boltz produced zero structures for all six complexes** (known backend bug in
-  `run_boltz.py`'s OOM string-match — see HANDOFF.md). The ensembles are 4–5
-  backends, not 6.
+- **Boltz** ran for the four small complexes (100 models each; all pass the
+  energy filter). It was broken until 2026-09-09 — `abcfold`'s env-build pinned
+  `cuequivariance-ops-torch-cu12` to 0.11 (needs torch ≥ 2.11 vs the env's 2.7),
+  and the run needed `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to fit
+  the H200 (~96 % VRAM). Boltz **still OOMs the two ASK1/CUL1 complexes**
+  (~2265 res) — those remain 4-backend. See §7 for what Boltz changed.
 - **Chai-1 is absent from the two ASK1/CUL1 complexes** (2265 aa > Chai's
   2048-token cap) — those runs are 4 backends (AF3, OpenFold3, Protenix, RF3).
 - **RoseTTAFold3 minimisation instability:** 27–40 % of RF3 models per complex
@@ -254,8 +262,41 @@ more variable** once the miRNA is present:
 
 ---
 
-*Working tree note: `notebooks/generate_domain_notebooks.py` + all 7 notebooks
-are modified (generator bug-fixes for plotly ≥6 and the multi-complex
-`pose_clustering.ipynb`; notebooks now carry executed outputs). Not committed —
-review and commit at your discretion. Automation scripts for the weekend run are
-in the session scratchpad (`weekend_driver.sh`, `weekend_finalize.sh`).*
+## 7. Boltz addendum (2026-09-09)
+
+Boltz (100 models each) was added to the four small complexes and folded into
+the analysis via `scripts/rehydrate_minimise_cache.py` (the ~1976 pre-Boltz
+minimise/PLIP results were carried forward; only the ~400 new Boltz models
+recomputed). Effect:
+
+- **Boltz reinforces the consensus, overturns nothing.** Its top AGO1–FBW2
+  domain contact is `PIWI × C_tail` at **54.8/model** — essentially identical
+  to the pooled value (55.2) and to what the ensemble already showed. Same
+  interaction profile (~50 % H-bond, ~35 % hydrophobic, ~15 % salt bridge).
+- **Boltz joins the OpenFold3 / RoseTTAFold3 pose family**, not the
+  Chai-1 / Protenix / AF3 one — e.g. in `ago1_fbw2` 58/100 Boltz models sit in
+  cluster 2 alongside OpenFold3 (61) and RF3 (82). So the two-pose-family split
+  is unchanged; Boltz is a 3rd vote for the RF3/OpenFold3 rigid-body pose.
+- **Boltz puts more weight on AGO1's Gly-rich N-extension**: its
+  `N_ext_Grich × {F_box, LRR_solenoid, C_tail}` rates (22 / 26 / 23) are the
+  highest of any backend. This is the flexible N-terminus, so treat it as
+  low-confidence, but it is a mild Boltz-specific signal toward N-extension
+  involvement in the interface.
+- **Boltz does *not* support the focused PAZ↔FBW2-LRR aromatic patch**
+  (`PAZ × LRR` = 2.5/model for Boltz vs 16 for Chai-1). That patch stays
+  backend-dependent — Chai-1 emphasises it, Boltz and RF3 don't.
+- Energy filter: all 100 Boltz models pass every complex (clean minimisation
+  energies, 0 flagged); 565–577 / 600 models kept overall (the RF3 blow-ups
+  are still filtered).
+
+Boltz OOMs the two ASK1/CUL1 complexes (~2265 res) on the 143 GB H200 — those
+stay 4-backend. Env fix + `PYTORCH_CUDA_ALLOC_CONF` fix are in
+`config.yaml` / `submit_abcfold.sh`; see HANDOFF.md STATUS 2026-09-08/09.
+
+---
+
+*All 7 notebooks + `generate_domain_notebooks.py` + `RESULTS_SUMMARY.md` are
+committed on `main` (executed outputs included). The 4 small-complex notebooks
++ `pose_clustering.ipynb` reflect the 6-backend ensemble; the 2 ASK1/CUL1
+notebooks are unchanged (4-backend). Weekend/Boltz automation scripts live in
+the session scratchpad.*

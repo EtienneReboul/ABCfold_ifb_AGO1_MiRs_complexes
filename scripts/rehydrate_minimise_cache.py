@@ -67,7 +67,11 @@ SNAPSHOT = ".rehydrate_snapshot.tsv"
 # for every carried-forward model.
 LAYER_GAP = 4  # seconds between dependency layers (> fs mtime granularity)
 ARTEFACTS = {
-    "minimized":        [("{f}.pdb", 0), ("{f}_fixed.pdb", 1)],
+    # {f}_energy.csv sits next to the minimised pdb — the domain notebooks'
+    # energy filter reads it; without it a carried-forward model is treated as
+    # "unassessed" and always kept (so e.g. the RF3 energy-blow-up models that
+    # should be dropped slip back in).
+    "minimized":        [("{f}.pdb", 0), ("{f}_energy.csv", 0), ("{f}_fixed.pdb", 1)],
     "plip":             [("{f}_report/{f}_report.txt", 2), ("{f}_report/csv/summary.csv", 3)],
     "plip_mir_ligands": [("{f}_report/{f}_report.txt", 2), ("{f}_report/csv/summary.csv", 3)],
 }

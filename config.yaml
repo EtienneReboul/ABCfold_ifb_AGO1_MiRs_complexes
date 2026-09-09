@@ -25,6 +25,7 @@
 # ASK1 = SKP1-like, CUL1 = CULLIN 1.
 complexes:
   - ago1_fbw2                       # AGO1 + FBW2 (binary, no miR)
+  - ago1_atg8a                      # AGO1 + ATG8A (binary, no miR) — UniProt Q8LEM4 / AT4G21980.2
   - ago1_fbw2_mir165a              # + miR165a (21 nt)
   - ago1_fbw2_mir168               # + miR168  (21 nt)
   - ago1_fbw2_mir393a              # + miR393a (22 nt)
